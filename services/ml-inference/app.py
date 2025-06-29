@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import numpy as np
 import logging
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 import time
 
 # Configure logging
@@ -66,7 +66,12 @@ def predict():
 @app.route('/metrics', methods=['GET'])
 def metrics():
     """Prometheus metrics endpoint"""
-    return generate_latest()
+    try:
+        # Return metrics with proper content type
+        return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+    except Exception as e:
+        logger.error(f"Metrics error: {str(e)}")
+        return "Metrics unavailable", 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8001, debug=False)

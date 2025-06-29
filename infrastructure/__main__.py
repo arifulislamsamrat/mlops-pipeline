@@ -2,6 +2,14 @@ import pulumi
 import pulumi_aws as aws
 import json
 from pulumi import Config, Output
+import os
+
+# Create key pair resource
+key = aws.ec2.KeyPair("mlops-key",
+    key_name="mlops-key",
+    public_key=open("../mlops-key.pub").read(),  
+    tags={"Project": "mlops-pipeline"}
+)
 
 # Get configuration
 config = Config()
@@ -173,6 +181,7 @@ echo "Please configure AWS credentials and ECR access manually" > /home/ubuntu/s
 
 # Create EC2 instance WITHOUT IAM instance profile
 instance = aws.ec2.Instance("mlops-instance",
+    key_name=key.key_name,
     instance_type="t3.medium",
     ami="ami-0df7a207adb9748c7",  # Ubuntu 22.04 LTS in ap-southeast-1
     subnet_id=public_subnet.id,
