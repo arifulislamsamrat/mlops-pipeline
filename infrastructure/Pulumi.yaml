@@ -1,0 +1,6 @@
+name: mlops-infrastructure
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: MLOps infrastructure for microservices deployment

@@ -1,0 +1,275 @@
+
+name: Deploy MLOps Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: ap-southeast-1
+  PULUMI_STACK: dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [ml-inference, data-ingestion]
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        cd services/${{ matrix.service }}
+        pip install -r requirements.txt
+        pip install pytest
+
+    - name: Run tests
+      run: |
+        cd services/${{ matrix.service }}
+        python -m pytest tests/ -v
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        service: [ml-inference, data-ingestion]
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Get Pulumi outputs
+      id: pulumi-outputs
+      run: |
+        cd infrastructure
+        pip install pulumi pulumi-aws
+        pulumi login --local
+        pulumi stack select ${{ env.PULUMI_STACK }}
+
+        if [ "${{ matrix.service }}" == "ml-inference" ]; then
+          echo "repository_url=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
+        else
+          echo "repository_url=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REPOSITORY: ${{ steps.pulumi-outputs.outputs.repository_url }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd services/${{ matrix.service }}
+        docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+        docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_REPOSITORY:latest
+        docker push $ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REPOSITORY:latest
+
+  deploy-infrastructure:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Pulumi
+      run: |
+        curl -fsSL https://get.pulumi.com | sh
+        echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+
+    - name: Deploy infrastructure
+      run: |
+        cd infrastructure
+        pip install -r requirements.txt
+        pulumi login --local
+        pulumi stack select ${{ env.PULUMI_STACK }}
+        pulumi up --yes
+
+    - name: Get deployment outputs
+      id: get-outputs
+      run: |
+        cd infrastructure
+        echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
+        echo "ml_inference_repo=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
+        echo "data_ingestion_repo=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
+
+  deploy-services:
+    needs: deploy-infrastructure
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Get instance details
+      id: get-instance
+      run: |
+        cd infrastructure
+        pip install pulumi pulumi-aws
+        pulumi login --local
+        pulumi stack select ${{ env.PULUMI_STACK }}
+        echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
+
+    - name: Deploy services to EC2
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ steps.get-instance.outputs.instance_ip }}
+        username: ubuntu
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Wait for Docker to be ready
+          while ! docker info > /dev/null 2>&1; do
+            echo "Waiting for Docker to start..."
+            sleep 5
+          done
+
+# Login to ECR
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+# Create docker-compose.yml
+          cat > /home/ubuntu/docker-compose.yml << 'EOF'
+          version: '3.8'
+
+          services:
+            ml-inference:
+              image: ${ML_INFERENCE_IMAGE}
+              ports:
+                - "8001:8001"
+              restart: always
+              networks:
+                - mlops-network
+
+            data-ingestion:
+              image: ${DATA_INGESTION_IMAGE}
+              ports:
+                - "8002:8002"
+              restart: always
+              networks:
+                - mlops-network
+
+            prometheus:
+              image: prom/prometheus:latest
+              ports:
+                - "9090:9090"
+              volumes:
+                - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+                - prometheus-data:/prometheus
+              command:
+                - '--config.file=/etc/prometheus/prometheus.yml'
+                - '--storage.tsdb.path=/prometheus'
+              restart: always
+              networks:
+                - mlops-network
+
+            grafana:
+              image: grafana/grafana:latest
+              ports:
+                - "3000:3000"
+              environment:
+                - GF_SECURITY_ADMIN_PASSWORD=admin
+                - GF_USERS_ALLOW_SIGN_UP=false
+              volumes:
+                - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+                - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+                - grafana-data:/var/lib/grafana
+              depends_on:
+                - prometheus
+              restart: always
+              networks:
+                - mlops-network
+
+          networks:
+            mlops-network:
+              driver: bridge
+
+          volumes:
+            prometheus-data:
+            grafana-data:
+          EOF
+
+# Create monitoring configuration
+          mkdir -p /home/ubuntu/monitoring/prometheus
+          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/datasources
+          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/dashboards
+          mkdir -p /home/ubuntu/monitoring/grafana/dashboards
+
+# Create Prometheus config
+          cat > /home/ubuntu/monitoring/prometheus/prometheus.yml << 'EOF'
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: 'ml-inference'
+              static_configs:
+                - targets: ['ml-inference:8001']
+              metrics_path: '/metrics'
+
+            - job_name: 'data-ingestion'
+              static_configs:
+                - targets: ['data-ingestion:8002']
+              metrics_path: '/metrics'
+          EOF
+
+# Get ECR repository URLs
+          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names mlops/ml-inference --query 'repositories[0].repositoryUri' --output text)
+          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names mlops/data-ingestion --query 'repositories[0].repositoryUri' --output text)
+
+# Export environment variables and deploy
+          export ML_INFERENCE_IMAGE="${ML_INFERENCE_REPO}:latest"
+          export DATA_INGESTION_IMAGE="${DATA_INGESTION_REPO}:latest"
+
+# Pull latest images
+          docker pull $ML_INFERENCE_IMAGE
+          docker pull $DATA_INGESTION_IMAGE
+
+# Deploy services
+          docker-compose down
+          docker-compose up -d
+
+# Wait for services to start
+          sleep 30
+
+# Check service health
+          curl -f http://localhost:8001/health || exit 1
+          curl -f http://localhost:8002/health || exit 1
+          echo "Services deployed successfully!"
