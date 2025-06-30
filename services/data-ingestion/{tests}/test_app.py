@@ -1,6 +1,17 @@
 import unittest
 import json
-from app import app
+import sys
+import os
+
+# Add the parent directory to Python path so we can import app
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from app import app
+except ImportError:
+    # If direct import fails, try relative import
+    import app as app_module
+    app = app_module.app
 
 class TestDataIngestion(unittest.TestCase):
     def setUp(self):
