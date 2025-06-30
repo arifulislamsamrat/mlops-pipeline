@@ -1,4 +1,3 @@
-
 name: Deploy MLOps Pipeline
 
 on:
@@ -162,16 +161,74 @@ jobs:
             sleep 5
           done
 
-# Login to ECR
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          # Login to ECR
+          aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.ap-southeast-1.amazonaws.com
 
-# Create docker-compose.yml
-          cat > /home/ubuntu/docker-compose.yml << 'EOF'
+          # Create monitoring directories
+          mkdir -p /home/ubuntu/monitoring/prometheus
+          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/datasources
+          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/dashboards
+          mkdir -p /home/ubuntu/monitoring/grafana/dashboards
+
+          # Create Prometheus config
+          cat > /home/ubuntu/monitoring/prometheus/prometheus.yml << 'PROMETHEUS_EOF'
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: 'ml-inference'
+              static_configs:
+                - targets: ['ml-inference:8001']
+              metrics_path: '/metrics'
+
+            - job_name: 'data-ingestion'
+              static_configs:
+                - targets: ['data-ingestion:8002']
+              metrics_path: '/metrics'
+          PROMETHEUS_EOF
+
+          # Create Grafana datasource config
+          cat > /home/ubuntu/monitoring/grafana/provisioning/datasources/prometheus.yml << 'DATASOURCE_EOF'
+          apiVersion: 1
+
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: false
+          DATASOURCE_EOF
+
+          # Create Grafana dashboard provisioning config
+          cat > /home/ubuntu/monitoring/grafana/provisioning/dashboards/dashboard.yml << 'DASHBOARD_EOF'
+          apiVersion: 1
+
+          providers:
+            - name: 'MLOps Dashboards'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+                foldersFromFilesStructure: true
+          DASHBOARD_EOF
+
+          # Get ECR repository URLs
+          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names mlops/ml-inference --query 'repositories[0].repositoryUri' --output text)
+          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names mlops/data-ingestion --query 'repositories[0].repositoryUri' --output text)
+
+          # Create docker-compose.yml
+          cat > /home/ubuntu/docker-compose.yml << 'COMPOSE_EOF'
           version: '3.8'
 
           services:
             ml-inference:
-              image: ${ML_INFERENCE_IMAGE}
+              image: ML_INFERENCE_IMAGE_PLACEHOLDER
               ports:
                 - "8001:8001"
               restart: always
@@ -179,7 +236,7 @@ jobs:
                 - mlops-network
 
             data-ingestion:
-              image: ${DATA_INGESTION_IMAGE}
+              image: DATA_INGESTION_IMAGE_PLACEHOLDER
               ports:
                 - "8002:8002"
               restart: always
@@ -224,52 +281,25 @@ jobs:
           volumes:
             prometheus-data:
             grafana-data:
-          EOF
+          COMPOSE_EOF
 
-# Create monitoring configuration
-          mkdir -p /home/ubuntu/monitoring/prometheus
-          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/datasources
-          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/dashboards
-          mkdir -p /home/ubuntu/monitoring/grafana/dashboards
+          # Replace placeholders with actual image URLs
+          sed -i "s|ML_INFERENCE_IMAGE_PLACEHOLDER|${ML_INFERENCE_REPO}:latest|g" /home/ubuntu/docker-compose.yml
+          sed -i "s|DATA_INGESTION_IMAGE_PLACEHOLDER|${DATA_INGESTION_REPO}:latest|g" /home/ubuntu/docker-compose.yml
 
-# Create Prometheus config
-          cat > /home/ubuntu/monitoring/prometheus/prometheus.yml << 'EOF'
-          global:
-            scrape_interval: 15s
-            evaluation_interval: 15s
+          # Pull latest images
+          docker pull ${ML_INFERENCE_REPO}:latest
+          docker pull ${DATA_INGESTION_REPO}:latest
 
-          scrape_configs:
-            - job_name: 'ml-inference'
-              static_configs:
-                - targets: ['ml-inference:8001']
-              metrics_path: '/metrics'
-
-            - job_name: 'data-ingestion'
-              static_configs:
-                - targets: ['data-ingestion:8002']
-              metrics_path: '/metrics'
-          EOF
-
-# Get ECR repository URLs
-          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names mlops/ml-inference --query 'repositories[0].repositoryUri' --output text)
-          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names mlops/data-ingestion --query 'repositories[0].repositoryUri' --output text)
-
-# Export environment variables and deploy
-          export ML_INFERENCE_IMAGE="${ML_INFERENCE_REPO}:latest"
-          export DATA_INGESTION_IMAGE="${DATA_INGESTION_REPO}:latest"
-
-# Pull latest images
-          docker pull $ML_INFERENCE_IMAGE
-          docker pull $DATA_INGESTION_IMAGE
-
-# Deploy services
+          # Deploy services
+          cd /home/ubuntu
           docker-compose down
           docker-compose up -d
 
-# Wait for services to start
+          # Wait for services to start
           sleep 30
 
-# Check service health
+          # Check service health
           curl -f http://localhost:8001/health || exit 1
           curl -f http://localhost:8002/health || exit 1
           echo "Services deployed successfully!"
