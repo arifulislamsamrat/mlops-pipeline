@@ -1,6 +1,3 @@
-
-
-
 apiVersion: 1
 
 datasources:
@@ -14,3 +11,4 @@ datasources:
       timeInterval: "15s"
       queryTimeout: "60s"
       httpMethod: "POST"
+EOF
