@@ -58,6 +58,10 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    outputs:
+      instance_ip: ${{ steps.get-outputs.outputs.instance_ip }}
+      ml_inference_repo: ${{ steps.get-outputs.outputs.ml_inference_repo }}
+      data_ingestion_repo: ${{ steps.get-outputs.outputs.data_ingestion_repo }}
 
     steps:
     - uses: actions/checkout@v4
@@ -68,6 +72,12 @@ jobs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
+
+    - name: Download Pulumi state
+      uses: actions/download-artifact@v4
+      with:
+        name: pulumi-state
+        path: ~/.pulumi
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -99,6 +109,13 @@ jobs:
         echo "ml_inference_repo=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
         echo "data_ingestion_repo=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
 
+    - name: Upload Pulumi state
+      uses: actions/upload-artifact@v4
+      with:
+        name: pulumi-state
+        path: ~/.pulumi
+        retention-days: 1
+
   build-and-push:
     needs: deploy-infrastructure
     runs-on: ubuntu-latest
@@ -121,6 +138,18 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
+    - name: Download Pulumi state
+      uses: actions/download-artifact@v4
+      with:
+        name: pulumi-state
+        path: ~/.pulumi
+
+    - name: Download Pulumi state
+      uses: actions/download-artifact@v4
+      with:
+        name: pulumi-state
+        path: ~/.pulumi
+
     - name: Get Pulumi outputs
       id: pulumi-outputs
       env:
@@ -129,12 +158,11 @@ jobs:
         cd infrastructure
         pip install pulumi pulumi-aws
         pulumi login --local
-        pulumi stack select ${{ env.PULUMI_STACK }}
-
+        
         if [ "${{ matrix.service }}" == "ml-inference" ]; then
-          echo "repository_url=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
+          echo "repository_url=${{ needs.deploy-infrastructure.outputs.ml_inference_repo }}" >> $GITHUB_OUTPUT
         else
-          echo "repository_url=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
+          echo "repository_url=${{ needs.deploy-infrastructure.outputs.data_ingestion_repo }}" >> $GITHUB_OUTPUT
         fi
 
     - name: Build, tag, and push image to Amazon ECR
@@ -173,6 +201,12 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
+    - name: Download Pulumi state
+      uses: actions/download-artifact@v4
+      with:
+        name: pulumi-state
+        path: ~/.pulumi
+
     - name: Get instance details
       id: get-instance
       env:
@@ -181,8 +215,7 @@ jobs:
         cd infrastructure
         pip install pulumi pulumi-aws
         pulumi login --local
-        pulumi stack select ${{ env.PULUMI_STACK }}
-        echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
+        echo "instance_ip=${{ needs.deploy-infrastructure.outputs.instance_ip }}" >> $GITHUB_OUTPUT
 
     - name: Deploy services to EC2
       uses: appleboy/ssh-action@v1.0.3
