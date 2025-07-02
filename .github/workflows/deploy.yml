@@ -80,6 +80,8 @@ jobs:
         echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
 
     - name: Deploy infrastructure
+      env:
+        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       run: |
         cd infrastructure
         pip install -r requirements.txt
@@ -89,6 +91,8 @@ jobs:
 
     - name: Get deployment outputs
       id: get-outputs
+      env:
+        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       run: |
         cd infrastructure
         echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
@@ -119,6 +123,8 @@ jobs:
 
     - name: Get Pulumi outputs
       id: pulumi-outputs
+      env:
+        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       run: |
         cd infrastructure
         pip install pulumi pulumi-aws
@@ -169,6 +175,8 @@ jobs:
 
     - name: Get instance details
       id: get-instance
+      env:
+        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       run: |
         cd infrastructure
         pip install pulumi pulumi-aws
