@@ -195,96 +195,157 @@ jobs:
         echo "instance_ip=${{ needs.deploy-infrastructure.outputs.instance_ip }}" >> $GITHUB_OUTPUT
         echo "unique_suffix=${{ needs.deploy-infrastructure.outputs.unique_suffix }}" >> $GITHUB_OUTPUT
 
+    - name: Wait for EC2 instance to be ready
+      run: |
+        echo "Waiting for EC2 instance to be fully ready..."
+        INSTANCE_IP="${{ steps.get-instance.outputs.instance_ip }}"
+        
+        # Wait for SSH to be available
+        timeout=300
+        while ! nc -z $INSTANCE_IP 22; do
+          echo "Waiting for SSH on $INSTANCE_IP..."
+          sleep 10
+          timeout=$((timeout-10))
+          if [ $timeout -le 0 ]; then
+            echo "SSH timeout reached"
+            break
+          fi
+        done
+        
+        echo "SSH is available on $INSTANCE_IP"
+        sleep 30  # Additional buffer time
+
     - name: Deploy services to EC2
       uses: appleboy/ssh-action@v1.0.3
       with:
         host: ${{ steps.get-instance.outputs.instance_ip }}
         username: ubuntu
         key: ${{ secrets.EC2_SSH_KEY }}
-        timeout: 900s
+        timeout: 20m
+        command_timeout: 20m
         script: |
-          # Wait for cloud-init to complete first
-          echo "Waiting for cloud-init to complete..."
-          sudo cloud-init status --wait || true
+          set -e  # Exit on any error
           
-          # Wait for user_data script to complete
-          echo "Waiting for user_data script to complete..."
-          timeout=300
-          while [ ! -f /home/ubuntu/setup-info.txt ]; do
-            echo "Waiting for EC2 initialization to complete..."
-            sleep 10
-            timeout=$((timeout-10))
-            if [ $timeout -le 0 ]; then
-              echo "EC2 initialization timeout - proceeding anyway..."
-              break
-            fi
-          done
+          echo "=== Starting EC2 Service Deployment ==="
           
-          # Wait for Docker to be ready
-          echo "Waiting for Docker to be ready..."
-          timeout=300
-          while ! sudo docker info > /dev/null 2>&1; do
-            echo "Waiting for Docker to start..."
+          # Function to install Docker if not present
+          install_docker() {
+            echo "Installing Docker..."
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sudo sh get-docker.sh
+            sudo usermod -aG docker ubuntu
+            sudo systemctl start docker
+            sudo systemctl enable docker
             
-            # Try to start Docker if it's not running
-            sudo systemctl start docker || true
-            sudo systemctl enable docker || true
+            # Install Docker Compose
+            sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
             
-            sleep 15
-            timeout=$((timeout-15))
-            if [ $timeout -le 0 ]; then
-              echo "Docker failed to start within timeout"
-              echo "Checking Docker status..."
-              sudo systemctl status docker || true
-              echo "Trying to install Docker manually..."
-              curl -fsSL https://get.docker.com -o get-docker.sh
-              sudo sh get-docker.sh
-              sudo usermod -aG docker ubuntu
-              sudo systemctl start docker
-              sleep 30
-              break
-            fi
-          done
+            echo "Docker installation completed"
+          }
           
-          # Verify Docker is working
-          if sudo docker info > /dev/null 2>&1; then
-            echo "Docker is ready!"
+          # Check if Docker is installed, install if not
+          if ! command -v docker &> /dev/null; then
+            install_docker
           else
-            echo "Docker is still not ready, but continuing..."
+            echo "Docker is already installed"
+            sudo systemctl start docker
+            sudo systemctl enable docker
           fi
-
-          # Configure AWS CLI region
-          aws configure set default.region ap-southeast-1
-
+          
+          # Wait for Docker to be ready (with timeout)
+          echo "Waiting for Docker service to be ready..."
+          timeout 120 bash -c 'while ! sudo docker info > /dev/null 2>&1; do echo "Waiting for Docker..."; sleep 5; done' || {
+            echo "Docker service timeout - attempting restart..."
+            sudo systemctl restart docker
+            sleep 10
+            if ! sudo docker info > /dev/null 2>&1; then
+              echo "Docker still not ready - reinstalling..."
+              install_docker
+            fi
+          }
+          
+          echo "✓ Docker is ready!"
+          
+          # Configure AWS CLI
+          aws configure set default.region ap-southeast-1 || {
+            echo "Installing AWS CLI..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            sudo apt-get update
+            sudo apt-get install -y unzip
+            unzip awscliv2.zip
+            sudo ./aws/install
+            aws configure set default.region ap-southeast-1
+          }
+          
           # Login to ECR
           echo "Logging into ECR..."
           aws ecr get-login-password --region ap-southeast-1 | sudo docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.ap-southeast-1.amazonaws.com
-
+          
           # Create monitoring directories
           echo "Setting up monitoring directories..."
           mkdir -p /home/ubuntu/monitoring/prometheus
           mkdir -p /home/ubuntu/monitoring/grafana/provisioning/datasources
           mkdir -p /home/ubuntu/monitoring/grafana/provisioning/dashboards
           mkdir -p /home/ubuntu/monitoring/grafana/dashboards
-
+          
           # Create Prometheus config
           cat > /home/ubuntu/monitoring/prometheus/prometheus.yml << 'PROMETHEUS_EOF'
           global:
             scrape_interval: 15s
             evaluation_interval: 15s
+          
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets: []
+          
+          rule_files:
+            - "alerts.yml"
+          
           scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+          
             - job_name: 'ml-inference'
               static_configs:
                 - targets: ['ml-inference:8001']
               metrics_path: '/metrics'
-              scrape_interval: 30s
+              scrape_interval: 10s
+          
             - job_name: 'data-ingestion'
               static_configs:
                 - targets: ['data-ingestion:8002']
               metrics_path: '/metrics'
-              scrape_interval: 30s
+              scrape_interval: 10s
           PROMETHEUS_EOF
-
+          
+          # Create alerts configuration
+          cat > /home/ubuntu/monitoring/prometheus/alerts.yml << 'ALERTS_EOF'
+          groups:
+            - name: mlops_alerts
+              interval: 30s
+              rules:
+                - alert: ServiceDown
+                  expr: up == 0
+                  for: 1m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Service {{ \$labels.job }} is down"
+                    description: "{{ \$labels.job }} has been down for more than 1 minute"
+                
+                - alert: HighResponseTime
+                  expr: histogram_quantile(0.95, rate(data_ingestion_duration_seconds_bucket[5m])) > 1
+                  for: 5m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "High response time on {{ \$labels.job }}"
+                    description: "95th percentile response time is {{ \$value }} seconds"
+          ALERTS_EOF
+          
           # Create Grafana datasource config
           cat > /home/ubuntu/monitoring/grafana/provisioning/datasources/prometheus.yml << 'DATASOURCE_EOF'
           apiVersion: 1
@@ -295,8 +356,12 @@ jobs:
               url: http://prometheus:9090
               isDefault: true
               editable: false
+              jsonData:
+                timeInterval: "15s"
+                queryTimeout: "60s"
+                httpMethod: "POST"
           DATASOURCE_EOF
-
+          
           # Create Grafana dashboard provisioning config
           cat > /home/ubuntu/monitoring/grafana/provisioning/dashboards/dashboard.yml << 'DASHBOARD_EOF'
           apiVersion: 1
@@ -312,29 +377,25 @@ jobs:
                 path: /var/lib/grafana/dashboards
                 foldersFromFilesStructure: true
           DASHBOARD_EOF
-
-          # Get ECR repository URLs with unique suffix
+          
+          # Get ECR repository URLs
           UNIQUE_SUFFIX="${{ steps.get-instance.outputs.unique_suffix }}"
           echo "Using unique suffix: $UNIQUE_SUFFIX"
           
           ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names "mlops/ml-inference-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
           DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names "mlops/data-ingestion-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
-
+          
           if [ -z "$ML_INFERENCE_REPO" ] || [ -z "$DATA_INGESTION_REPO" ]; then
-            echo "Error: Could not retrieve ECR repository URLs"
-            echo "ML_INFERENCE_REPO: $ML_INFERENCE_REPO"
-            echo "DATA_INGESTION_REPO: $DATA_INGESTION_REPO"
-            
-            # List available repositories
+            echo "❌ Error: Could not retrieve ECR repository URLs"
             echo "Available repositories:"
             aws ecr describe-repositories --query 'repositories[].repositoryName' --output text
             exit 1
           fi
-
-          echo "Repository URLs retrieved:"
-          echo "ML Inference: $ML_INFERENCE_REPO"
-          echo "Data Ingestion: $DATA_INGESTION_REPO"
-
+          
+          echo "✓ Repository URLs retrieved:"
+          echo "  ML Inference: $ML_INFERENCE_REPO"
+          echo "  Data Ingestion: $DATA_INGESTION_REPO"
+          
           # Create docker-compose.yml
           cat > /home/ubuntu/docker-compose.yml << COMPOSE_EOF
           version: '3.8'
@@ -373,6 +434,7 @@ jobs:
                 - "9090:9090"
               volumes:
                 - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+                - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml
                 - prometheus-data:/prometheus
               command:
                 - '--config.file=/etc/prometheus/prometheus.yml'
@@ -381,6 +443,7 @@ jobs:
                 - '--web.console.templates=/etc/prometheus/consoles'
                 - '--storage.tsdb.retention.time=200h'
                 - '--web.enable-lifecycle'
+                - '--web.enable-admin-api'
               restart: always
               networks:
                 - mlops-network
@@ -411,55 +474,68 @@ jobs:
             prometheus-data:
             grafana-data:
           COMPOSE_EOF
-
-          # Add user to docker group and ensure permissions
+          
+          # Add user to docker group
           sudo usermod -aG docker ubuntu
-          newgrp docker || true
-
+          
           # Pull latest images
-          echo "Pulling latest images..."
+          echo "📥 Pulling latest images..."
           sudo docker pull ${ML_INFERENCE_REPO}:latest || exit 1
           sudo docker pull ${DATA_INGESTION_REPO}:latest || exit 1
-
+          
           # Deploy services
-          echo "Deploying services..."
+          echo "🚀 Deploying services..."
           cd /home/ubuntu
           sudo docker-compose down || true
           sudo docker-compose up -d
-
+          
           # Wait for services to start
-          echo "Waiting for services to start..."
-          sleep 120
-
+          echo "⏳ Waiting for services to start..."
+          sleep 60
+          
           # Check service health with retries
-          echo "Checking service health..."
-          for i in {1..15}; do
-            echo "Health check attempt $i..."
+          echo "🔍 Checking service health..."
+          success=false
+          for i in {1..10}; do
+            echo "Health check attempt $i/10..."
             
             ML_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health 2>/dev/null || echo "000")
             DATA_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8002/health 2>/dev/null || echo "000")
+            PROM_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9090/-/healthy 2>/dev/null || echo "000")
+            GRAF_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health 2>/dev/null || echo "000")
             
-            echo "ML Inference health: $ML_HEALTH"
-            echo "Data Ingestion health: $DATA_HEALTH"
+            echo "  ML Inference: $ML_HEALTH"
+            echo "  Data Ingestion: $DATA_HEALTH"
+            echo "  Prometheus: $PROM_HEALTH" 
+            echo "  Grafana: $GRAF_HEALTH"
             
             if [ "$ML_HEALTH" = "200" ] && [ "$DATA_HEALTH" = "200" ]; then
-              echo "✓ All services are healthy!"
-              echo "🎉 Deployment completed successfully!"
-              echo ""
-              echo "Access URLs:"
-              PUBLIC_IP=$(curl -s ifconfig.me)
-              echo "- ML Inference: http://${PUBLIC_IP}:8001"
-              echo "- Data Ingestion: http://${PUBLIC_IP}:8002"
-              echo "- Prometheus: http://${PUBLIC_IP}:9090"
-              echo "- Grafana: http://${PUBLIC_IP}:3000 (admin/admin)"
-              exit 0
+              echo "✅ Core services are healthy!"
+              success=true
+              break
             else
-              echo "Services not ready yet, waiting..."
-              sleep 30
+              echo "⏳ Services not ready yet, waiting..."
+              sleep 20
             fi
           done
           
-          echo "✗ Services failed to become healthy within timeout"
-          echo "Container logs:"
-          sudo docker-compose logs --tail=50
-          exit 1
+          if [ "$success" = true ]; then
+            echo ""
+            echo "🎉 Deployment completed successfully!"
+            echo ""
+            PUBLIC_IP=$(curl -s ifconfig.me)
+            echo "📊 Access URLs:"
+            echo "  🤖 ML Inference:   http://${PUBLIC_IP}:8001"
+            echo "  📈 Data Ingestion: http://${PUBLIC_IP}:8002"
+            echo "  📊 Prometheus:     http://${PUBLIC_IP}:9090"
+            echo "  📈 Grafana:        http://${PUBLIC_IP}:3000 (admin/admin)"
+            echo ""
+            echo "✅ All systems operational!"
+          else
+            echo "❌ Service health check failed"
+            echo "📋 Container status:"
+            sudo docker-compose ps
+            echo "📋 Container logs:"
+            sudo docker-compose logs --tail=20
+            exit 1
+          fi
