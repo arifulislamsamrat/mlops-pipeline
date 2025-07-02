@@ -62,6 +62,7 @@ jobs:
       instance_ip: ${{ steps.get-outputs.outputs.instance_ip }}
       ml_inference_repo: ${{ steps.get-outputs.outputs.ml_inference_repo }}
       data_ingestion_repo: ${{ steps.get-outputs.outputs.data_ingestion_repo }}
+      unique_suffix: ${{ steps.get-outputs.outputs.unique_suffix }}
 
     steps:
     - uses: actions/checkout@v4
@@ -102,6 +103,7 @@ jobs:
         echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
         echo "ml_inference_repo=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
         echo "data_ingestion_repo=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
+        echo "unique_suffix=$(pulumi stack output unique_suffix)" >> $GITHUB_OUTPUT
 
   build-and-push:
     needs: deploy-infrastructure
@@ -156,7 +158,7 @@ jobs:
         echo "Successfully built and pushed ${{ matrix.service }}"
 
   deploy-services:
-    needs: build-and-push
+    needs: [deploy-infrastructure, build-and-push]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
 
@@ -174,6 +176,7 @@ jobs:
       id: get-instance
       run: |
         echo "instance_ip=${{ needs.deploy-infrastructure.outputs.instance_ip }}" >> $GITHUB_OUTPUT
+        echo "unique_suffix=${{ needs.deploy-infrastructure.outputs.unique_suffix }}" >> $GITHUB_OUTPUT
 
     - name: Deploy services to EC2
       uses: appleboy/ssh-action@v1.0.3
@@ -185,11 +188,11 @@ jobs:
         script: |
           # Wait for Docker to be ready
           echo "Waiting for Docker to be ready..."
-          timeout=60
+          timeout=120
           while ! docker info > /dev/null 2>&1; do
             echo "Waiting for Docker to start..."
-            sleep 5
-            timeout=$((timeout-5))
+            sleep 10
+            timeout=$((timeout-10))
             if [ $timeout -le 0 ]; then
               echo "Docker failed to start within timeout"
               exit 1
@@ -221,10 +224,12 @@ jobs:
               static_configs:
                 - targets: ['ml-inference:8001']
               metrics_path: '/metrics'
+              scrape_interval: 30s
             - job_name: 'data-ingestion'
               static_configs:
                 - targets: ['data-ingestion:8002']
               metrics_path: '/metrics'
+              scrape_interval: 30s
           PROMETHEUS_EOF
 
           # Create Grafana datasource config
@@ -255,15 +260,21 @@ jobs:
                 foldersFromFilesStructure: true
           DASHBOARD_EOF
 
-          # Get ECR repository URLs
-          echo "Getting ECR repository URLs..."
-          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names mlops/ml-inference --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
-          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names mlops/data-ingestion --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
+          # Get ECR repository URLs with unique suffix
+          UNIQUE_SUFFIX="${{ steps.get-instance.outputs.unique_suffix }}"
+          echo "Using unique suffix: $UNIQUE_SUFFIX"
+          
+          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names "mlops/ml-inference-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
+          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names "mlops/data-ingestion-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
 
           if [ -z "$ML_INFERENCE_REPO" ] || [ -z "$DATA_INGESTION_REPO" ]; then
             echo "Error: Could not retrieve ECR repository URLs"
             echo "ML_INFERENCE_REPO: $ML_INFERENCE_REPO"
             echo "DATA_INGESTION_REPO: $DATA_INGESTION_REPO"
+            
+            # List available repositories
+            echo "Available repositories:"
+            aws ecr describe-repositories --query 'repositories[].repositoryName' --output text
             exit 1
           fi
 
@@ -287,6 +298,7 @@ jobs:
                 interval: 30s
                 timeout: 10s
                 retries: 3
+                start_period: 40s
                 
             data-ingestion:
               image: ${DATA_INGESTION_REPO}:latest
@@ -300,6 +312,7 @@ jobs:
                 interval: 30s
                 timeout: 10s
                 retries: 3
+                start_period: 40s
                 
             prometheus:
               image: prom/prometheus:latest
@@ -311,6 +324,10 @@ jobs:
               command:
                 - '--config.file=/etc/prometheus/prometheus.yml'
                 - '--storage.tsdb.path=/prometheus'
+                - '--web.console.libraries=/etc/prometheus/console_libraries'
+                - '--web.console.templates=/etc/prometheus/consoles'
+                - '--storage.tsdb.retention.time=200h'
+                - '--web.enable-lifecycle'
               restart: always
               networks:
                 - mlops-network
@@ -322,6 +339,7 @@ jobs:
               environment:
                 - GF_SECURITY_ADMIN_PASSWORD=admin
                 - GF_USERS_ALLOW_SIGN_UP=false
+                - GF_INSTALL_PLUGINS=
               volumes:
                 - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
                 - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
@@ -354,20 +372,36 @@ jobs:
 
           # Wait for services to start
           echo "Waiting for services to start..."
-          sleep 60
+          sleep 90
 
           # Check service health with retries
           echo "Checking service health..."
-          for i in {1..5}; do
-            if curl -f http://localhost:8001/health && curl -f http://localhost:8002/health; then
+          for i in {1..10}; do
+            echo "Health check attempt $i..."
+            
+            ML_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health 2>/dev/null || echo "000")
+            DATA_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8002/health 2>/dev/null || echo "000")
+            
+            echo "ML Inference health: $ML_HEALTH"
+            echo "Data Ingestion health: $DATA_HEALTH"
+            
+            if [ "$ML_HEALTH" = "200" ] && [ "$DATA_HEALTH" = "200" ]; then
               echo "✓ All services are healthy!"
+              echo "🎉 Deployment completed successfully!"
+              echo ""
+              echo "Access URLs:"
+              echo "- ML Inference: http://$(curl -s ifconfig.me):8001"
+              echo "- Data Ingestion: http://$(curl -s ifconfig.me):8002"
+              echo "- Prometheus: http://$(curl -s ifconfig.me):9090"
+              echo "- Grafana: http://$(curl -s ifconfig.me):3000 (admin/admin)"
               exit 0
             else
-              echo "Attempt $i: Services not ready yet, waiting..."
+              echo "Services not ready yet, waiting..."
               sleep 30
             fi
           done
           
-          echo "✗ Services failed to become healthy"
-          docker-compose logs
+          echo "✗ Services failed to become healthy within timeout"
+          echo "Container logs:"
+          docker-compose logs --tail=50
           exit 1

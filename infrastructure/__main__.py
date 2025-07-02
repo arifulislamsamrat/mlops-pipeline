@@ -3,17 +3,22 @@ import pulumi_aws as aws
 import json
 from pulumi import Config, Output
 import os
+import time
 
-# Create key pair resource
-key = aws.ec2.KeyPair("mlops-key",
-    key_name="mlops-key",
-    public_key=open("../mlops-key.pub").read(),  
-    tags={"Project": "mlops-pipeline"}
-)
+# Generate unique suffix to avoid resource conflicts
+unique_suffix = str(int(time.time()))[-6:]
+stack_name = pulumi.get_stack()
 
 # Get configuration
 config = Config()
 region = "ap-southeast-1"
+
+# Create key pair resource with unique name
+key = aws.ec2.KeyPair("mlops-key",
+    key_name=f"mlops-key-{unique_suffix}",
+    public_key="""ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDH5x8QJ+XYzK9k3L2M8N9P0Q1R2S3T4U5V6W7X8Y9Z0A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U1V2W3X4Y5Z6A7B8C9D0E1F2G3H4I5J6K7L8M9N0O1P2Q3R4S5T6U7V8W9X0Y1Z2A3B4C5D6E7F8G9H0I1J2K3L4M5N6O7P8Q9R0S1T2U3V4W5X6Y7Z8A9B0C1D2E3F4G5H6I7J8K9L0M1N2O3P4Q5R6S7T8U9V0W1X2Y3Z4A5B6C7D8E9F0G1H2I3J4K5L6M7N8O9P0Q1R2S3T4U5V6W7X8Y9Z0A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U1V2W3X4Y5Z6A7B8C9D0E1F2G3H4I5J6K7L8M9N0O1P2Q3R4S5T6U7V8W9X0Y1Z2A3B4C5D6E7F8G9H0I1J2K3L4M5N6O7P8Q9R0S1T2U3V4W5X6Y7Z8A9B0C1D2E3F4G5H6I7J8K9L0M1N2O3P4Q5R6S7T8U9V0W1X2Y3Z4A5B6C7D8E9F0G1H2I3J4K5L6M7N8O9P0Q1R2S3T4U5V6W7X8Y9Z0""",
+    tags={"Project": f"mlops-pipeline-{stack_name}"}
+)
 
 # Create VPC
 vpc = aws.ec2.Vpc("mlops-vpc",
@@ -21,8 +26,8 @@ vpc = aws.ec2.Vpc("mlops-vpc",
     enable_dns_hostnames=True,
     enable_dns_support=True,
     tags={
-        "Name": "mlops-vpc",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-vpc-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
@@ -30,8 +35,8 @@ vpc = aws.ec2.Vpc("mlops-vpc",
 igw = aws.ec2.InternetGateway("mlops-igw",
     vpc_id=vpc.id,
     tags={
-        "Name": "mlops-igw",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-igw-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
@@ -42,8 +47,8 @@ public_subnet = aws.ec2.Subnet("mlops-public-subnet",
     availability_zone=f"{region}a",
     map_public_ip_on_launch=True,
     tags={
-        "Name": "mlops-public-subnet",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-public-subnet-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
@@ -57,8 +62,8 @@ route_table = aws.ec2.RouteTable("mlops-route-table",
         )
     ],
     tags={
-        "Name": "mlops-route-table",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-route-table-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
@@ -70,6 +75,7 @@ route_table_association = aws.ec2.RouteTableAssociation("mlops-rta",
 
 # Create security group
 security_group = aws.ec2.SecurityGroup("mlops-sg",
+    name=f"mlops-sg-{unique_suffix}",
     vpc_id=vpc.id,
     description="Security group for MLOps services",
     ingress=[
@@ -124,38 +130,38 @@ security_group = aws.ec2.SecurityGroup("mlops-sg",
         )
     ],
     tags={
-        "Name": "mlops-security-group",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-security-group-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
-# Create ECR repositories
+# Create ECR repositories with unique names
 ml_inference_repo = aws.ecr.Repository("ml-inference-repo",
-    name="mlops/ml-inference",
+    name=f"mlops/ml-inference-{unique_suffix}",
     image_tag_mutability="MUTABLE",
     image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(
         scan_on_push=True,
     ),
     tags={
-        "Name": "ml-inference-repo",
-        "Project": "mlops-pipeline"
+        "Name": f"ml-inference-repo-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
 data_ingestion_repo = aws.ecr.Repository("data-ingestion-repo",
-    name="mlops/data-ingestion",
+    name=f"mlops/data-ingestion-{unique_suffix}",
     image_tag_mutability="MUTABLE",
     image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(
         scan_on_push=True,
     ),
     tags={
-        "Name": "data-ingestion-repo",
-        "Project": "mlops-pipeline"
+        "Name": f"data-ingestion-repo-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
-# Modified user data script - removed ECR login since no IAM role
-user_data = """#!/bin/bash
+# Enhanced user data script
+user_data = f"""#!/bin/bash
 # Update system
 sudo apt-get update
 sudo apt-get upgrade -y
@@ -166,27 +172,60 @@ sudo sh get-docker.sh
 sudo usermod -aG docker ubuntu
 
 # Install Docker Compose
-sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose
 
-# Install AWS CLI
-sudo apt-get install -y awscli
+# Install AWS CLI v2
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+sudo apt-get install -y unzip
+unzip awscliv2.zip
+sudo ./aws/install
+
+# Install curl for health checks
+sudo apt-get install -y curl jq
 
 # Create directories
-mkdir -p /home/ubuntu/mlops/{services,monitoring}
+mkdir -p /home/ubuntu/mlops/{{services,monitoring}}
+mkdir -p /home/ubuntu/monitoring/{{prometheus,grafana}}
 
-# Note: ECR login will be done manually or through GitHub Actions
-echo "Please configure AWS credentials and ECR access manually" > /home/ubuntu/setup-notes.txt
+# Set up Docker to start on boot
+sudo systemctl enable docker
+sudo systemctl start docker
+
+# Create setup info file
+cat > /home/ubuntu/setup-info.txt << 'INFO_EOF'
+MLOps Infrastructure Setup Complete
+
+Key Information:
+- Docker and Docker Compose installed
+- AWS CLI v2 installed
+- Directories created for services and monitoring
+- ECR repositories created with unique suffix: {unique_suffix}
+
+Next Steps:
+1. Configure AWS credentials
+2. Login to ECR
+3. Deploy services via GitHub Actions
+
+Repository URLs:
+- ML Inference: {unique_suffix}
+- Data Ingestion: {unique_suffix}
+INFO_EOF
+
+# Set proper ownership
+sudo chown -R ubuntu:ubuntu /home/ubuntu/
+
+# Wait for cloud-init to complete
+cloud-init status --wait
 """
 
-# Create EC2 instance WITHOUT IAM instance profile
+# Create EC2 instance
 instance = aws.ec2.Instance("mlops-instance",
     key_name=key.key_name,
     instance_type="t3.medium",
     ami="ami-0df7a207adb9748c7",  # Ubuntu 22.04 LTS in ap-southeast-1
     subnet_id=public_subnet.id,
     vpc_security_group_ids=[security_group.id],
-    # REMOVED: iam_instance_profile parameter
     user_data=user_data,
     root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(
         volume_type="gp3",
@@ -194,18 +233,18 @@ instance = aws.ec2.Instance("mlops-instance",
         delete_on_termination=True
     ),
     tags={
-        "Name": "mlops-instance",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-instance-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
-# Create Elastic IP
+# Create Elastic IP with correct syntax
 elastic_ip = aws.ec2.Eip("mlops-eip",
     instance=instance.id,
-    vpc=True,
+    domain="vpc",  # Use domain instead of vpc=True
     tags={
-        "Name": "mlops-eip",
-        "Project": "mlops-pipeline"
+        "Name": f"mlops-eip-{stack_name}",
+        "Project": f"mlops-pipeline-{stack_name}"
     }
 )
 
@@ -219,3 +258,5 @@ pulumi.export("ml_inference_repo_url", ml_inference_repo.repository_url)
 pulumi.export("data_ingestion_repo_url", data_ingestion_repo.repository_url)
 pulumi.export("grafana_url", Output.concat("http://", elastic_ip.public_ip, ":3000"))
 pulumi.export("prometheus_url", Output.concat("http://", elastic_ip.public_ip, ":9090"))
+pulumi.export("key_pair_name", key.key_name)
+pulumi.export("unique_suffix", unique_suffix)
