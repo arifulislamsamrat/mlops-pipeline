@@ -86,18 +86,18 @@ jobs:
 
     - name: Deploy infrastructure
       env:
-        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+        PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
       run: |
         cd infrastructure
         pip install -r requirements.txt
-        pulumi login --local
+        pulumi login
         pulumi stack select ${{ env.PULUMI_STACK }} --create
         pulumi up --yes
 
     - name: Get deployment outputs
       id: get-outputs
       env:
-        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+        PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
       run: |
         cd infrastructure
         echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
@@ -184,11 +184,11 @@ jobs:
         host: ${{ steps.get-instance.outputs.instance_ip }}
         username: ubuntu
         key: ${{ secrets.EC2_SSH_KEY }}
-        timeout: 300s
+        timeout: 600s
         script: |
           # Wait for Docker to be ready
           echo "Waiting for Docker to be ready..."
-          timeout=120
+          timeout=180
           while ! docker info > /dev/null 2>&1; do
             echo "Waiting for Docker to start..."
             sleep 10
@@ -298,7 +298,7 @@ jobs:
                 interval: 30s
                 timeout: 10s
                 retries: 3
-                start_period: 40s
+                start_period: 60s
                 
             data-ingestion:
               image: ${DATA_INGESTION_REPO}:latest
@@ -312,7 +312,7 @@ jobs:
                 interval: 30s
                 timeout: 10s
                 retries: 3
-                start_period: 40s
+                start_period: 60s
                 
             prometheus:
               image: prom/prometheus:latest
@@ -372,11 +372,11 @@ jobs:
 
           # Wait for services to start
           echo "Waiting for services to start..."
-          sleep 90
+          sleep 120
 
           # Check service health with retries
           echo "Checking service health..."
-          for i in {1..10}; do
+          for i in {1..15}; do
             echo "Health check attempt $i..."
             
             ML_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health 2>/dev/null || echo "000")
@@ -390,10 +390,11 @@ jobs:
               echo "🎉 Deployment completed successfully!"
               echo ""
               echo "Access URLs:"
-              echo "- ML Inference: http://$(curl -s ifconfig.me):8001"
-              echo "- Data Ingestion: http://$(curl -s ifconfig.me):8002"
-              echo "- Prometheus: http://$(curl -s ifconfig.me):9090"
-              echo "- Grafana: http://$(curl -s ifconfig.me):3000 (admin/admin)"
+              PUBLIC_IP=$(curl -s ifconfig.me)
+              echo "- ML Inference: http://${PUBLIC_IP}:8001"
+              echo "- Data Ingestion: http://${PUBLIC_IP}:8002"
+              echo "- Prometheus: http://${PUBLIC_IP}:9090"
+              echo "- Grafana: http://${PUBLIC_IP}:3000 (admin/admin)"
               exit 0
             else
               echo "Services not ready yet, waiting..."
