@@ -184,28 +184,64 @@ jobs:
         host: ${{ steps.get-instance.outputs.instance_ip }}
         username: ubuntu
         key: ${{ secrets.EC2_SSH_KEY }}
-        timeout: 600s
+        timeout: 900s
         script: |
-          # Wait for Docker to be ready
-          echo "Waiting for Docker to be ready..."
-          timeout=180
-          while ! docker info > /dev/null 2>&1; do
-            echo "Waiting for Docker to start..."
+          # Wait for cloud-init to complete first
+          echo "Waiting for cloud-init to complete..."
+          sudo cloud-init status --wait || true
+          
+          # Wait for user_data script to complete
+          echo "Waiting for user_data script to complete..."
+          timeout=300
+          while [ ! -f /home/ubuntu/setup-info.txt ]; do
+            echo "Waiting for EC2 initialization to complete..."
             sleep 10
             timeout=$((timeout-10))
             if [ $timeout -le 0 ]; then
-              echo "Docker failed to start within timeout"
-              exit 1
+              echo "EC2 initialization timeout - proceeding anyway..."
+              break
             fi
           done
-          echo "Docker is ready!"
+          
+          # Wait for Docker to be ready
+          echo "Waiting for Docker to be ready..."
+          timeout=300
+          while ! sudo docker info > /dev/null 2>&1; do
+            echo "Waiting for Docker to start..."
+            
+            # Try to start Docker if it's not running
+            sudo systemctl start docker || true
+            sudo systemctl enable docker || true
+            
+            sleep 15
+            timeout=$((timeout-15))
+            if [ $timeout -le 0 ]; then
+              echo "Docker failed to start within timeout"
+              echo "Checking Docker status..."
+              sudo systemctl status docker || true
+              echo "Trying to install Docker manually..."
+              curl -fsSL https://get.docker.com -o get-docker.sh
+              sudo sh get-docker.sh
+              sudo usermod -aG docker ubuntu
+              sudo systemctl start docker
+              sleep 30
+              break
+            fi
+          done
+          
+          # Verify Docker is working
+          if sudo docker info > /dev/null 2>&1; then
+            echo "Docker is ready!"
+          else
+            echo "Docker is still not ready, but continuing..."
+          fi
 
           # Configure AWS CLI region
           aws configure set default.region ap-southeast-1
 
           # Login to ECR
           echo "Logging into ECR..."
-          aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.ap-southeast-1.amazonaws.com
+          aws ecr get-login-password --region ap-southeast-1 | sudo docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.ap-southeast-1.amazonaws.com
 
           # Create monitoring directories
           echo "Setting up monitoring directories..."
@@ -359,16 +395,20 @@ jobs:
             grafana-data:
           COMPOSE_EOF
 
+          # Add user to docker group and ensure permissions
+          sudo usermod -aG docker ubuntu
+          newgrp docker || true
+
           # Pull latest images
           echo "Pulling latest images..."
-          docker pull ${ML_INFERENCE_REPO}:latest || exit 1
-          docker pull ${DATA_INGESTION_REPO}:latest || exit 1
+          sudo docker pull ${ML_INFERENCE_REPO}:latest || exit 1
+          sudo docker pull ${DATA_INGESTION_REPO}:latest || exit 1
 
           # Deploy services
           echo "Deploying services..."
           cd /home/ubuntu
-          docker-compose down || true
-          docker-compose up -d
+          sudo docker-compose down || true
+          sudo docker-compose up -d
 
           # Wait for services to start
           echo "Waiting for services to start..."
@@ -404,5 +444,5 @@ jobs:
           
           echo "✗ Services failed to become healthy within timeout"
           echo "Container logs:"
-          docker-compose logs --tail=50
+          sudo docker-compose logs --tail=50
           exit 1
