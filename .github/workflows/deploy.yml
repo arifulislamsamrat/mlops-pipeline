@@ -73,12 +73,6 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Download Pulumi state
-      uses: actions/download-artifact@v4
-      with:
-        name: pulumi-state
-        path: ~/.pulumi
-
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
@@ -109,13 +103,6 @@ jobs:
         echo "ml_inference_repo=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
         echo "data_ingestion_repo=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
 
-    - name: Upload Pulumi state
-      uses: actions/upload-artifact@v4
-      with:
-        name: pulumi-state
-        path: ~/.pulumi
-        retention-days: 1
-
   build-and-push:
     needs: deploy-infrastructure
     runs-on: ubuntu-latest
@@ -138,27 +125,9 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Download Pulumi state
-      uses: actions/download-artifact@v4
-      with:
-        name: pulumi-state
-        path: ~/.pulumi
-
-    - name: Download Pulumi state
-      uses: actions/download-artifact@v4
-      with:
-        name: pulumi-state
-        path: ~/.pulumi
-
     - name: Get Pulumi outputs
       id: pulumi-outputs
-      env:
-        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       run: |
-        cd infrastructure
-        pip install pulumi pulumi-aws
-        pulumi login --local
-        
         if [ "${{ matrix.service }}" == "ml-inference" ]; then
           echo "repository_url=${{ needs.deploy-infrastructure.outputs.ml_inference_repo }}" >> $GITHUB_OUTPUT
         else
@@ -201,20 +170,9 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Download Pulumi state
-      uses: actions/download-artifact@v4
-      with:
-        name: pulumi-state
-        path: ~/.pulumi
-
     - name: Get instance details
       id: get-instance
-      env:
-        PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       run: |
-        cd infrastructure
-        pip install pulumi pulumi-aws
-        pulumi login --local
         echo "instance_ip=${{ needs.deploy-infrastructure.outputs.instance_ip }}" >> $GITHUB_OUTPUT
 
     - name: Deploy services to EC2
