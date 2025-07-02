@@ -3,7 +3,6 @@ import pulumi_aws as aws
 import json
 from pulumi import Config, Output
 import os
-import time
 
 # Use stable suffix instead of timestamp to avoid resource conflicts
 unique_suffix = "main"
@@ -135,7 +134,7 @@ security_group = aws.ec2.SecurityGroup("mlops-sg",
     }
 )
 
-# Create ECR repositories with unique names
+# Create ECR repositories with unique names and force delete
 ml_inference_repo = aws.ecr.Repository("ml-inference-repo",
     name=f"mlops/ml-inference-{unique_suffix}",
     image_tag_mutability="MUTABLE",
