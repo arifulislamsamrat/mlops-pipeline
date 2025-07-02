@@ -84,6 +84,23 @@ jobs:
         curl -fsSL https://get.pulumi.com | sh
         echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
 
+    - name: Clean up existing ECR repositories
+      run: |
+        echo "Cleaning up existing ECR repositories..."
+        
+        # Clean up any MLOps ECR repositories
+        REPOS=$(aws ecr describe-repositories --query 'repositories[?contains(repositoryName, `mlops/`)].repositoryName' --output text 2>/dev/null || echo "")
+        
+        if [ ! -z "$REPOS" ]; then
+          for repo in $REPOS; do
+            echo "Force deleting repository: $repo"
+            aws ecr delete-repository --repository-name "$repo" --force || true
+          done
+          echo "ECR cleanup completed"
+        else
+          echo "No existing MLOps ECR repositories found"
+        fi
+
     - name: Deploy infrastructure
       env:
         PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
