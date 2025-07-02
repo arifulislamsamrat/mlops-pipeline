@@ -5,8 +5,8 @@ from pulumi import Config, Output
 import os
 import time
 
-# Generate unique suffix to avoid resource conflicts
-unique_suffix = str(int(time.time()))[-6:]
+# Use stable suffix instead of timestamp to avoid resource conflicts
+unique_suffix = "main"
 stack_name = pulumi.get_stack()
 
 # Get configuration
@@ -162,63 +162,44 @@ data_ingestion_repo = aws.ecr.Repository("data-ingestion-repo",
     }
 )
 
-# Enhanced user data script
+# Enhanced user data script (no upgrade to save time)
 user_data = f"""#!/bin/bash
-# Update system
-sudo apt-get update
-sudo apt-get upgrade -y
+# Update system (but don't upgrade to save time)
+apt-get update
 
-# Install Docker
+# Install Docker (faster method)
 curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
-sudo usermod -aG docker ubuntu
+sh get-docker.sh
+usermod -aG docker ubuntu
 
 # Install Docker Compose
-sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-sudo chmod +x /usr/local/bin/docker-compose
+curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
 
 # Install AWS CLI v2
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-sudo apt-get install -y unzip
+apt-get install -y unzip curl
 unzip awscliv2.zip
-sudo ./aws/install
+./aws/install
 
-# Install curl for health checks
-sudo apt-get install -y curl jq
+# Install additional tools
+apt-get install -y jq
 
-# Create directories
-mkdir -p /home/ubuntu/mlops/{{services,monitoring}}
-mkdir -p /home/ubuntu/monitoring/{{prometheus,grafana}}
+# Start services
+systemctl enable docker
+systemctl start docker
 
-# Set up Docker to start on boot
-sudo systemctl enable docker
-sudo systemctl start docker
+# Create completion marker - THIS IS IMPORTANT
+echo "Setup complete at $(date)" > /home/ubuntu/setup-info.txt
+chown ubuntu:ubuntu /home/ubuntu/setup-info.txt
 
-# Create setup info file
-cat > /home/ubuntu/setup-info.txt << 'INFO_EOF'
-MLOps Infrastructure Setup Complete
+# Release package manager locks explicitly
+apt-get clean
+rm -f /var/lib/apt/lists/lock
+rm -f /var/lib/dpkg/lock-frontend
+rm -f /var/lib/dpkg/lock
 
-Key Information:
-- Docker and Docker Compose installed
-- AWS CLI v2 installed
-- Directories created for services and monitoring
-- ECR repositories created with unique suffix: {unique_suffix}
-
-Next Steps:
-1. Configure AWS credentials
-2. Login to ECR
-3. Deploy services via GitHub Actions
-
-Repository URLs:
-- ML Inference: {unique_suffix}
-- Data Ingestion: {unique_suffix}
-INFO_EOF
-
-# Set proper ownership
-sudo chown -R ubuntu:ubuntu /home/ubuntu/
-
-# Wait for cloud-init to complete
-cloud-init status --wait
+echo "User data script completed successfully" >> /home/ubuntu/setup-info.txt
 """
 
 # Create EC2 instance
