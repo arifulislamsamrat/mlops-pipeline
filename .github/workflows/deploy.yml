@@ -8,7 +8,7 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
-  PULUMI_STACK: rfsamrat/mlops-pipeline/dev
+  PULUMI_STACK: rfsamrat/mlops-pipeline/sandbox
 
 jobs:
   test:
@@ -84,31 +84,51 @@ jobs:
         curl -fsSL https://get.pulumi.com | sh
         echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
 
-    - name: Clean up existing ECR repositories
+    - name: Complete stack cleanup and fresh start
+      env:
+        PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
       run: |
-        echo "Cleaning up existing ECR repositories..."
+        echo "Performing complete stack cleanup..."
         
-        # Clean up any MLOps ECR repositories
+        # Clean up any MLOps ECR repositories first
         REPOS=$(aws ecr describe-repositories --query 'repositories[?contains(repositoryName, `mlops/`)].repositoryName' --output text 2>/dev/null || echo "")
-        
         if [ ! -z "$REPOS" ]; then
           for repo in $REPOS; do
             echo "Force deleting repository: $repo"
             aws ecr delete-repository --repository-name "$repo" --force || true
           done
-          echo "ECR cleanup completed"
-        else
-          echo "No existing MLOps ECR repositories found"
         fi
+        
+        cd infrastructure
+        pip install -r requirements.txt
+        pulumi login
+        
+        # Check if stack exists and remove it completely
+        if pulumi stack ls | grep -q "${{ env.PULUMI_STACK }}"; then
+          echo "Stack exists, removing completely..."
+          
+          # Try to select and destroy (ignore errors)
+          pulumi stack select ${{ env.PULUMI_STACK }} || true
+          pulumi destroy --yes --skip-preview || true
+          
+          # Force remove the stack entirely
+          pulumi stack rm ${{ env.PULUMI_STACK }} --yes --force || true
+          echo "Stack removed"
+        else
+          echo "No existing stack found"
+        fi
+        
+        # Create completely fresh stack
+        echo "Creating fresh stack..."
+        pulumi stack init ${{ env.PULUMI_STACK }}
+        echo "Fresh stack created successfully"
 
     - name: Deploy infrastructure
       env:
         PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
       run: |
         cd infrastructure
-        pip install -r requirements.txt
-        pulumi login
-        pulumi stack select ${{ env.PULUMI_STACK }} --create
+        pulumi stack select ${{ env.PULUMI_STACK }}
         pulumi up --yes
 
     - name: Get deployment outputs
@@ -213,7 +233,7 @@ jobs:
         done
         
         echo "SSH is available on $INSTANCE_IP"
-        sleep 30  # Additional buffer time
+        sleep 60  # Longer buffer time for user_data to complete
 
     - name: Deploy services to EC2
       uses: appleboy/ssh-action@v1.0.3
@@ -226,13 +246,13 @@ jobs:
         script: |
           echo "=== Starting EC2 Service Deployment ==="
           
-          # Simple approach - wait for setup completion then proceed
+          # Wait for setup completion with longer timeout
           echo "Waiting for EC2 initialization to complete..."
-          timeout=900  # 15 minutes
+          timeout=1200  # 20 minutes
           while [ ! -f /home/ubuntu/setup-info.txt ] && [ $timeout -gt 0 ]; do
             echo "Waiting for setup completion... ($timeout seconds remaining)"
-            sleep 15
-            timeout=$((timeout-15))
+            sleep 20
+            timeout=$((timeout-20))
           done
           
           if [ ! -f /home/ubuntu/setup-info.txt ]; then
@@ -274,7 +294,7 @@ jobs:
           
           # Wait for Docker to be ready
           echo "Waiting for Docker to be ready..."
-          timeout 180 bash -c 'while ! sudo docker info > /dev/null 2>&1; do echo "Waiting for Docker..."; sleep 5; done'
+          timeout 300 bash -c 'while ! sudo docker info > /dev/null 2>&1; do echo "Waiting for Docker..."; sleep 5; done'
           
           if sudo docker info > /dev/null 2>&1; then
             echo "✅ Docker is ready!"
@@ -380,6 +400,12 @@ jobs:
               restart: always
               networks:
                 - mlops-network
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 90s
                 
             data-ingestion:
               image: ${DATA_INGESTION_REPO}:latest
@@ -388,6 +414,12 @@ jobs:
               restart: always
               networks:
                 - mlops-network
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 90s
                 
             prometheus:
               image: prom/prometheus:latest
@@ -446,13 +478,13 @@ jobs:
           
           # Wait for services to start
           echo "⏳ Waiting for services to initialize..."
-          sleep 60
+          sleep 120
           
           # Check service health
           echo "🔍 Checking service health..."
           success=false
-          for i in {1..15}; do
-            echo "Health check attempt $i/15..."
+          for i in {1..20}; do
+            echo "Health check attempt $i/20..."
             
             ML_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health 2>/dev/null || echo "000")
             DATA_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8002/health 2>/dev/null || echo "000")
@@ -465,8 +497,8 @@ jobs:
               success=true
               break
             else
-              echo "⏳ Services starting up, waiting 20 seconds..."
-              sleep 20
+              echo "⏳ Services starting up, waiting 25 seconds..."
+              sleep 25
             fi
           done
           
@@ -490,12 +522,12 @@ jobs:
             echo ""
             echo "✅ Deployment completed successfully!"
           else
-            echo "❌ Service health check failed after 15 attempts"
+            echo "❌ Service health check failed after 20 attempts"
             echo ""
             echo "🔍 Container status:"
             sudo docker-compose ps
             echo ""
             echo "📋 Recent container logs:"
-            sudo docker-compose logs --tail=10
+            sudo docker-compose logs --tail=15
             exit 1
           fi

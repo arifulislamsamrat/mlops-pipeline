@@ -161,35 +161,57 @@ data_ingestion_repo = aws.ecr.Repository("data-ingestion-repo",
     }
 )
 
-# Enhanced user data script (no upgrade to save time)
+# Enhanced user data script (optimized for t2.micro)
 user_data = f"""#!/bin/bash
-# Update system (but don't upgrade to save time)
+# Update system (but don't upgrade to save time and resources)
 apt-get update
 
-# Install Docker (faster method)
+# Install Docker (lighter installation for t2.micro)
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
 usermod -aG docker ubuntu
 
-# Install Docker Compose
+# Install Docker Compose (lighter version)
 curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
 
 # Install AWS CLI v2
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-apt-get install -y unzip curl
+apt-get install -y unzip curl jq
+
+# Extract and install AWS CLI
 unzip awscliv2.zip
 ./aws/install
+rm -rf aws awscliv2.zip get-docker.sh
 
-# Install additional tools
-apt-get install -y jq
+# Configure Docker for t2.micro (limit resources)
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << 'DOCKER_EOF'
+{{
+  "log-driver": "json-file",
+  "log-opts": {{
+    "max-size": "10m",
+    "max-file": "3"
+  }},
+  "storage-driver": "overlay2"
+}}
+DOCKER_EOF
 
 # Start services
 systemctl enable docker
 systemctl start docker
 
+# Wait for Docker to be ready
+timeout=60
+while ! docker info > /dev/null 2>&1 && [ $timeout -gt 0 ]; do
+    sleep 2
+    timeout=$((timeout-2))
+done
+
 # Create completion marker - THIS IS IMPORTANT
 echo "Setup complete at $(date)" > /home/ubuntu/setup-info.txt
+echo "Instance type: t2.micro" >> /home/ubuntu/setup-info.txt
+echo "Docker status: $(systemctl is-active docker)" >> /home/ubuntu/setup-info.txt
 chown ubuntu:ubuntu /home/ubuntu/setup-info.txt
 
 # Release package manager locks explicitly
@@ -204,14 +226,14 @@ echo "User data script completed successfully" >> /home/ubuntu/setup-info.txt
 # Create EC2 instance
 instance = aws.ec2.Instance("mlops-instance",
     key_name=key.key_name,
-    instance_type="t3.medium",
+    instance_type="t2.micro",  # Changed to t2.micro for free tier/sandbox
     ami="ami-0df7a207adb9748c7",  # Ubuntu 22.04 LTS in ap-southeast-1
     subnet_id=public_subnet.id,
     vpc_security_group_ids=[security_group.id],
     user_data=user_data,
     root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(
-        volume_type="gp3",
-        volume_size=30,
+        volume_type="gp2",  # Changed to gp2 for free tier compatibility
+        volume_size=20,     # Reduced to 20GB for free tier
         delete_on_termination=True
     ),
     tags={
