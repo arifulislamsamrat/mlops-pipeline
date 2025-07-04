@@ -126,6 +126,7 @@ jobs:
     - name: Deploy infrastructure
       env:
         PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
       run: |
         cd infrastructure
         pulumi stack select ${{ env.PULUMI_STACK }}

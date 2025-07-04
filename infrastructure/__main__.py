@@ -12,10 +12,12 @@ stack_name = pulumi.get_stack()
 config = Config()
 region = "ap-southeast-1"
 
-# Create key pair resource with unique name - reading from your existing file
+# Create key pair resource with unique name - using environment variable or default
 key = aws.ec2.KeyPair("mlops-key",
     key_name=f"mlops-key-{unique_suffix}",
-    public_key=open("../mlops-key.pub").read().strip(),  # Read from your existing SSH key file
+    public_key=os.environ.get("SSH_PUBLIC_KEY", 
+        "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7qR4nX8J5K2Mz3vL6P9Q1sT7uV2wX4y5Z6a7B8c9D0e1F2g3H4i5J6k7L8m9N0o1P2q3R4s5T6u7V8w9X0y1Z2a3B4c5D6e7F8g9H0i1J2k3L4m5N6o7P8q9R0s1T2u3V4w5X6y7Z8a9B0c1D2e3F4g5H6i7J8k9L0m1N2o3P4q5R6s7T8u9V0w1X2y3Z4a5B6c7D8e9F0g1H2i3J4k5L6m7N8o9P0q1R2s3T4u5V6w7X8y9Z0a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6a7B8c9D0e1F2g3H4i5J6k7L8m9N0o1P2q3R4s5T6u7V8w9X0y1Z2"
+    ),
     tags={"Project": f"mlops-pipeline-{stack_name}"}
 )
 
