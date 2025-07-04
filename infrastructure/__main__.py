@@ -12,12 +12,10 @@ stack_name = pulumi.get_stack()
 config = Config()
 region = "ap-southeast-1"
 
-# Create key pair resource with unique name - using environment variable or default
+# Create key pair from your existing public key
 key = aws.ec2.KeyPair("mlops-key",
     key_name=f"mlops-key-{unique_suffix}",
-    public_key=os.environ.get("SSH_PUBLIC_KEY", 
-        "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7qR4nX8J5K2Mz3vL6P9Q1sT7uV2wX4y5Z6a7B8c9D0e1F2g3H4i5J6k7L8m9N0o1P2q3R4s5T6u7V8w9X0y1Z2a3B4c5D6e7F8g9H0i1J2k3L4m5N6o7P8q9R0s1T2u3V4w5X6y7Z8a9B0c1D2e3F4g5H6i7J8k9L0m1N2o3P4q5R6s7T8u9V0w1X2y3Z4a5B6c7D8e9F0g1H2i3J4k5L6m7N8o9P0q1R2s3T4u5V6w7X8y9Z0a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6a7B8c9D0e1F2g3H4i5J6k7L8m9N0o1P2q3R4s5T6u7V8w9X0y1Z2"
-    ),
+    public_key=os.environ.get("SSH_PUBLIC_KEY", ""),  # Will come from GitHub secret
     tags={"Project": f"mlops-pipeline-{stack_name}"}
 )
 
@@ -227,7 +225,7 @@ echo "User data script completed successfully" >> /home/ubuntu/setup-info.txt
 
 # Create EC2 instance
 instance = aws.ec2.Instance("mlops-instance",
-    key_name=key.key_name,
+    key_name=key.key_name,  # Use the created key pair
     instance_type="t2.micro",  # Changed to t2.micro for free tier/sandbox
     ami="ami-0df7a207adb9748c7",  # Ubuntu 22.04 LTS in ap-southeast-1
     subnet_id=public_subnet.id,
@@ -264,5 +262,4 @@ pulumi.export("ml_inference_repo_url", ml_inference_repo.repository_url)
 pulumi.export("data_ingestion_repo_url", data_ingestion_repo.repository_url)
 pulumi.export("grafana_url", Output.concat("http://", elastic_ip.public_ip, ":3000"))
 pulumi.export("prometheus_url", Output.concat("http://", elastic_ip.public_ip, ":9090"))
-pulumi.export("key_pair_name", key.key_name)
 pulumi.export("unique_suffix", unique_suffix)

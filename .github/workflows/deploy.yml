@@ -244,7 +244,13 @@ jobs:
         key: ${{ secrets.EC2_SSH_KEY }}
         timeout: 30m
         command_timeout: 30m
-        script: |
+        envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,UNIQUE_SUFFIX
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ap-southeast-1
+        UNIQUE_SUFFIX: ${{ steps.get-instance.outputs.unique_suffix }}
+      script: |
           echo "=== Starting EC2 Service Deployment ==="
           
           # Wait for setup completion with longer timeout
@@ -305,9 +311,20 @@ jobs:
             exit 1
           fi
           
-          # Configure AWS CLI
-          echo "Configuring AWS CLI..."
+          # Configure AWS CLI with credentials from environment
+          echo "Configuring AWS CLI with provided credentials..."
+          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
           aws configure set default.region ap-southeast-1
+          
+          # Test AWS credentials
+          echo "Testing AWS credentials..."
+          if aws sts get-caller-identity; then
+            echo "✅ AWS credentials working"
+          else
+            echo "❌ AWS credentials not working"
+            exit 1
+          fi
           
           # Login to ECR
           echo "Logging into ECR..."
@@ -373,7 +390,6 @@ jobs:
           DASHBOARD_EOF
           
           # Get ECR repository URLs
-          UNIQUE_SUFFIX="${{ steps.get-instance.outputs.unique_suffix }}"
           echo "Using unique suffix: $UNIQUE_SUFFIX"
           
           ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names "mlops/ml-inference-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
