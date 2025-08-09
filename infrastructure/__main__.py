@@ -253,7 +253,9 @@ elastic_ip = aws.ec2.Eip("mlops-eip",
 )
 
 # Export outputs
+
 pulumi.export("vpc_id", vpc.id)
+
 pulumi.export("subnet_id", public_subnet.id)
 pulumi.export("security_group_id", security_group.id)
 pulumi.export("instance_id", instance.id)
